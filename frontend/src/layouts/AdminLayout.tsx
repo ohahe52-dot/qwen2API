@@ -1,18 +1,21 @@
 import { Outlet, Link, useLocation } from "react-router-dom"
 import { Activity, Key, Settings, LayoutDashboard, MessageSquare, Menu, X, Image } from "lucide-react"
 import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import LanguageSwitcher from "../components/LanguageSwitcher"
 
 export default function AdminLayout() {
   const loc = useLocation()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const { t } = useTranslation()
 
   const navs = [
-    { name: "运行状态", path: "/", icon: LayoutDashboard },
-    { name: "账号管理", path: "/accounts", icon: Activity },
-    { name: "API Key", path: "/tokens", icon: Key },
-    { name: "接口测试", path: "/test", icon: MessageSquare },
-    { name: "图片生成", path: "/images", icon: Image },
-    { name: "系统设置", path: "/settings", icon: Settings },
+    { name: t("nav.dashboard"), path: "/", icon: LayoutDashboard },
+    { name: t("nav.accounts"), path: "/accounts", icon: Activity },
+    { name: t("nav.tokens"), path: "/tokens", icon: Key },
+    { name: t("nav.test"), path: "/test", icon: MessageSquare },
+    { name: t("nav.images"), path: "/images", icon: Image },
+    { name: t("nav.settings"), path: "/settings", icon: Settings },
   ]
 
   return (
@@ -54,6 +57,9 @@ export default function AdminLayout() {
             )
           })}
         </nav>
+        <div className="border-t border-border/40 p-2">
+          <LanguageSwitcher />
+        </div>
       </aside>
 
       <main className="flex-1 flex flex-col overflow-hidden relative">
