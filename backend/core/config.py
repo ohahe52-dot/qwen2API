@@ -77,38 +77,54 @@ settings = Settings()
 
 # 全局映射
 MODEL_MAP = {
-    # OpenAI
-    "gpt-4o":            "qwen3.6-plus",
-    "gpt-4o-mini":       "qwen3.5-flash",
-    "gpt-4-turbo":       "qwen3.6-plus",
-    "gpt-4":             "qwen3.6-plus",
-    "gpt-4.1":           "qwen3.6-plus",
-    "gpt-4.1-mini":      "qwen3.5-flash",
-    "gpt-3.5-turbo":     "qwen3.5-flash",
-    "gpt-5":             "qwen3.6-plus",
-    "o1":                "qwen3.6-plus",
-    "o1-mini":           "qwen3.5-flash",
-    "o3":                "qwen3.6-plus",
-    "o3-mini":           "qwen3.5-flash",
-    # Anthropic
-    "claude-opus-4-6":   "qwen3.6-plus",
-    "claude-sonnet-4-5": "qwen3.6-plus",
-    "claude-3-opus":     "qwen3.6-plus",
-    "claude-3.5-sonnet": "qwen3.6-plus",
-    "claude-3-sonnet":   "qwen3.6-plus",
-    "claude-3-haiku":    "qwen3.5-flash",
-    # Gemini
-    "gemini-2.5-pro":    "qwen3.6-plus",
-    "gemini-2.5-flash":  "qwen3.5-flash",
-    # Qwen aliases
-    "qwen":              "qwen3.6-plus",
-    "qwen-max":          "qwen3.6-plus",
-    "qwen-plus":         "qwen3.6-plus",
-    "qwen-turbo":        "qwen3.5-flash",
-    # DeepSeek
-    "deepseek-chat":     "qwen3.6-plus",
-    "deepseek-reasoner": "qwen3.6-plus",
+    # Qwen 3.7 Series
+    "qwen3.7-max":          "qwen3.7-max",
+    "qwen-max":             "qwen3.7-max",
+
+    # Qwen 3.6 Series
+    "qwen3.6-plus":         "qwen3.6-plus",
+    "qwen-plus":            "qwen3.6-plus",
+    "qwen":                 "qwen3.6-plus",
+
+    # Qwen 3.5 Series
+    "qwen3.5-plus":         "qwen3.5-plus",
+    "qwen3.5-flash":        "qwen3.5-flash",
+    "qwen-turbo":           "qwen3.5-flash",
 }
 
 def resolve_model(name: str) -> str:
-    return MODEL_MAP.get(name, name)
+    """
+    解析模型 ID，支持带 hậu tố (-fast, -think, -auto).
+    Nếu tìm thấy hậu tố, nó sẽ giải quyết phần tên gốc trước.
+    """
+    clean_name = name
+    if name.endswith(("-fast", "-think", "-auto")):
+        if name.endswith("-fast"): clean_name = name[:-5]
+        elif name.endswith("-think"): clean_name = name[:-6]
+        elif name.endswith("-auto"): clean_name = name[:-5]
+
+    return MODEL_MAP.get(clean_name, clean_name)
+
+def resolve_model_info(name: str) -> dict:
+    """
+    解析模型 ID 和思维模式。
+    支持后缀: -fast (Fast), -think (Think), -auto (Auto)
+    """
+    mode = "Auto"
+    clean_name = name
+
+    if name.endswith("-fast"):
+        mode = "Fast"
+        clean_name = name[:-5]
+    elif name.endswith("-think"):
+        mode = "Think"
+        clean_name = name[:-6]
+    elif name.endswith("-auto"):
+        mode = "Auto"
+        clean_name = name[:-5]
+
+    resolved = resolve_model(clean_name)
+    return {
+        "model": resolved,
+        "thinking_mode": mode
+    }

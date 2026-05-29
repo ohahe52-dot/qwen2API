@@ -36,3 +36,4 @@ class StandardRequest:
     persistent_session: bool = False
     session_message_hashes: list[str] = field(default_factory=list)
     session_chat_invalidated: bool = False
+    thinking_mode: str = "Auto" # "Auto", "Think", "Fast"

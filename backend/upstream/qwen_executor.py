@@ -100,12 +100,13 @@ class QwenExecutor:
         content: str,
         has_custom_tools: bool = False,
         files: list[dict] | None = None,
+        thinking_mode: str = "Auto",
     ):
         stream_fn = getattr(self.engine, "stream_chat_once", None) or getattr(self.engine, "fetch_chat", None)
         if stream_fn is None:
             raise Exception("stream transport unavailable")
 
-        payload = build_chat_payload(chat_id, model, content, has_custom_tools, files=files)
+        payload = build_chat_payload(chat_id, model, content, has_custom_tools, files=files, thinking_mode=thinking_mode)
         buffer = ""
         started_at = time.perf_counter()
         first_event_logged = False
@@ -181,6 +182,7 @@ class QwenExecutor:
         files: list[dict] | None = None,
         fixed_account=None,
         existing_chat_id: str | None = None,
+        thinking_mode: str = "Auto",
     ):
         exclude = set()
         if fixed_account is not None:
@@ -195,7 +197,7 @@ class QwenExecutor:
                 else:
                     log.info(f"[上游] 创建会话 会话={chat_id} 账号={acc.email}")
                 yield {"type": "meta", "chat_id": chat_id, "acc": acc}
-                async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files):
+                async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files, thinking_mode=thinking_mode):
                     yield {"type": "event", "event": evt}
                 return
             except Exception:
@@ -219,7 +221,7 @@ class QwenExecutor:
                 log.info(f"[上游] 创建会话 会话={chat_id} 账号={acc.email} 耗时={create_elapsed:.3f}s")
                 yield {"type": "meta", "chat_id": chat_id, "acc": acc}
 
-                async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files):
+                async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files, thinking_mode=thinking_mode):
                     yield {"type": "event", "event": evt}
                 return
 

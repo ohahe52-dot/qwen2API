@@ -20,7 +20,7 @@ CUSTOM_TOOL_LOW_LATENCY_OVERRIDES = {
 }
 
 
-def build_chat_payload(chat_id: str, model: str, content: str, has_custom_tools: bool = False, files: list[dict] | None = None) -> dict:
+def build_chat_payload(chat_id: str, model: str, content: str, has_custom_tools: bool = False, files: list[dict] | None = None, thinking_mode: str = "Auto") -> dict:
     ts = int(time.time())
     feature_config = {
         **CUSTOM_TOOL_COMPAT_FEATURE_CONFIG,
@@ -35,6 +35,20 @@ def build_chat_payload(chat_id: str, model: str, content: str, has_custom_tools:
         "enable_function_call": False,
         "tool_choice": "none",
     }
+
+    # Apply thinking mode overrides
+    if thinking_mode == "Fast":
+        feature_config["thinking_enabled"] = False
+        feature_config["auto_thinking"] = False
+    elif thinking_mode == "Think":
+        feature_config["thinking_enabled"] = True
+        feature_config["auto_thinking"] = False
+        feature_config["thinking_mode"] = "Think"
+    elif thinking_mode == "Auto":
+        feature_config["thinking_enabled"] = True
+        feature_config["auto_thinking"] = True
+        feature_config["thinking_mode"] = "Auto"
+
     return {
         "stream": True,
         "version": "2.1",
