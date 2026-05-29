@@ -191,6 +191,7 @@ class QwenClient:
         files: list[dict] | None = None,
         fixed_account=None,
         existing_chat_id: str | None = None,
+        thinking_mode: str = "Auto",
     ):
         async for item in self.executor.chat_stream_events_with_retry(
             model,
@@ -199,5 +200,6 @@ class QwenClient:
             files=files,
             fixed_account=fixed_account,
             existing_chat_id=existing_chat_id,
+            thinking_mode=thinking_mode,
         ):
             yield item
