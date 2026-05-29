@@ -226,6 +226,7 @@
     "tagFlagship": "旗舰级",
     "tagMainstream": "主流级",
     "tagLegacy": "旧版本",
-    "tagAlias": "别名"
+    "tagAlias": "别名",
+    "exampleTitle": "使用示例"
   }
 }
