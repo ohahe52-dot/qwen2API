@@ -5,7 +5,8 @@
     "tokens": "API Key",
     "test": "API Test",
     "images": "Image Gen",
-    "settings": "Settings"
+    "settings": "Settings",
+    "models": "Supported Models"
   },
   "common": {
     "refresh": "Refresh",
@@ -210,5 +211,21 @@
     "aliasesDesc": "Model names sent by downstream are auto-routed by the gateway to the actual Qwen models below. Please edit in standard JSON format.",
     "saveAliasesBtn": "Save aliases",
     "exampleTitle": "Usage example"
+  },
+  "models": {
+    "title": "Models & Modes",
+    "subtitle": "List of supported model identifiers and mode suffixes.",
+    "suffixTitle": "Mode Suffixes",
+    "suffixDesc": "You can append these suffixes to any Model ID to specify the operating mode.",
+    "fastDesc": "Fast Response (Thinking Disabled)",
+    "thinkDesc": "Deep Thinking (Thinking Enabled)",
+    "autoDesc": "Automatic (Qwen Default)",
+    "colModel": "Model ID",
+    "colResolved": "Base Model",
+    "colDesc": "Description",
+    "tagFlagship": "Flagship",
+    "tagMainstream": "Mainstream",
+    "tagLegacy": "Legacy",
+    "tagAlias": "Alias"
   }
 }

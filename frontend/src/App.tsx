@@ -7,6 +7,7 @@ import TestPage from "./pages/TestPage"
 import TokensPage from "./pages/TokensPage"
 import SettingsPage from "./pages/SettingsPage"
 import ImagePage from "./pages/ImagePage"
+import ModelsPage from "./pages/ModelsPage"
 
 function App() {
   return (
@@ -18,6 +19,7 @@ function App() {
             <Route index element={<Dashboard />} />
             <Route path="accounts" element={<AccountsPage />} />
             <Route path="tokens" element={<TokensPage />} />
+            <Route path="models" element={<ModelsPage />} />
             <Route path="test" element={<TestPage />} />
             <Route path="images" element={<ImagePage />} />
             <Route path="settings" element={<SettingsPage />} />

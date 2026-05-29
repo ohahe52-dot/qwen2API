@@ -5,7 +5,8 @@
     "tokens": "API Key",
     "test": "Kiểm thử API",
     "images": "Tạo ảnh",
-    "settings": "Cài đặt hệ thống"
+    "settings": "Cài đặt hệ thống",
+    "models": "Mô hình hỗ trợ"
   },
   "common": {
     "refresh": "Làm mới",
@@ -210,5 +211,21 @@
     "aliasesDesc": "Tên mô hình phía dưới gửi lên sẽ được cổng tự định tuyến tới mô hình Qwen thực tế bên dưới. Hãy chỉnh sửa theo định dạng JSON chuẩn.",
     "saveAliasesBtn": "Lưu ánh xạ",
     "exampleTitle": "Ví dụ sử dụng"
+  },
+  "models": {
+    "title": "Danh sách Mô hình & Chế độ",
+    "subtitle": "Danh sách các định danh mô hình (Model ID) và hậu tố chế độ được hệ thống hỗ trợ.",
+    "suffixTitle": "Hậu tố chế độ (Suffixes)",
+    "suffixDesc": "Bạn có thể thêm các hậu tố sau vào bất kỳ Model ID nào để chỉ định chế độ hoạt động.",
+    "fastDesc": "Phản hồi nhanh (Tắt Thinking)",
+    "thinkDesc": "Suy nghĩ sâu (Bật Thinking)",
+    "autoDesc": "Tự động (Mặc định của Qwen)",
+    "colModel": "Model ID",
+    "colResolved": "Mô hình gốc",
+    "colDesc": "Mô tả",
+    "tagFlagship": "Flagship",
+    "tagMainstream": "Phổ biến",
+    "tagLegacy": "Bản cũ",
+    "tagAlias": "Alias"
   }
 }

@@ -1,5 +1,5 @@
 import { Outlet, Link, useLocation } from "react-router-dom"
-import { Activity, Key, Settings, LayoutDashboard, MessageSquare, Menu, X, Image } from "lucide-react"
+import { Activity, Key, Settings, LayoutDashboard, MessageSquare, Menu, X, Image, Box } from "lucide-react"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import LanguageSwitcher from "../components/LanguageSwitcher"
@@ -13,6 +13,7 @@ export default function AdminLayout() {
     { name: t("nav.dashboard"), path: "/", icon: LayoutDashboard },
     { name: t("nav.accounts"), path: "/accounts", icon: Activity },
     { name: t("nav.tokens"), path: "/tokens", icon: Key },
+    { name: t("nav.models"), path: "/models", icon: Box },
     { name: t("nav.test"), path: "/test", icon: MessageSquare },
     { name: t("nav.images"), path: "/images", icon: Image },
     { name: t("nav.settings"), path: "/settings", icon: Settings },

@@ -5,7 +5,8 @@
     "tokens": "API Key",
     "test": "接口测试",
     "images": "图片生成",
-    "settings": "系统设置"
+    "settings": "系统设置",
+    "models": "支持模型"
   },
   "common": {
     "refresh": "刷新",
@@ -210,5 +211,21 @@
     "aliasesDesc": "下游传入的模型名称将被网关自动路由至以下千问实际模型。请使用标准 JSON 格式编辑。",
     "saveAliasesBtn": "保存映射",
     "exampleTitle": "使用示例"
+  },
+  "models": {
+    "title": "支持的模型与模式",
+    "subtitle": "系统支持的模型标识符和模式后缀列表。",
+    "suffixTitle": "模式后缀",
+    "suffixDesc": "您可以将这些后缀添加到任何模型 ID 后以指定运行模式。",
+    "fastDesc": "快速响应 (关闭思考)",
+    "thinkDesc": "深度思考 (开启思考)",
+    "autoDesc": "自动 (通义千问默认)",
+    "colModel": "模型 ID",
+    "colResolved": "基础模型",
+    "colDesc": "描述",
+    "tagFlagship": "旗舰级",
+    "tagMainstream": "主流级",
+    "tagLegacy": "旧版本",
+    "tagAlias": "别名"
   }
 }
