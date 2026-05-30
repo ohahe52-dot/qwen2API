@@ -25,6 +25,8 @@ from backend.services.task_session import (
     plan_persistent_session_turn,
 )
 from backend.runtime.execution import RuntimeAttemptState, build_tool_directive, build_usage_delta_factory, request_max_attempts
+from backend.api._stream_pump import StreamPump, make_on_delta, flush_streamer_tail
+from backend.services.incremental_text_streamer import IncrementalTextStreamer
 
 log = logging.getLogger("qwen2api.chat")
 router = APIRouter()
@@ -132,6 +134,14 @@ async def chat_completions(request: Request):
                 async with app.state.session_locks.hold(session_key):
                     try:
                         update_request_context(stream_attempt=1)
+                        pump = StreamPump()
+                        translator = None
+                        streamer = None
+
+                        async def _stream_callback(chunk: str) -> None:
+                            await pump.put(("ok", chunk))
+
+                        # Stream mode: translator phát chunk real-time qua callback
                         translator = OpenAIStreamTranslator(
                             completion_id=completion_id,
                             created=created,
@@ -142,41 +152,87 @@ async def chat_completions(request: Request):
                                 RuntimeAttemptState(answer_text=answer_text),
                             ),
                             allowed_tool_names=standard_request.tool_names,
+                            stream_callback=_stream_callback,
                         )
 
-                        async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
-                            translator.on_delta(evt, text_chunk, tool_calls)
+                        # IncrementalTextStreamer guard cho text answer (phát hiện tool-call marker)
+                        has_tools = bool(standard_request.tools)
+                        if has_tools:
+                            streamer = IncrementalTextStreamer(
+                                warmup_chars=64,
+                                guard_chars=256,
+                            )
 
-                        result = await run_retryable_completion_bridge(
-                            client=client,
-                            standard_request=standard_request,
-                            prompt=prompt,
-                            users_db=users_db,
-                            token=token,
-                            history_messages=history_messages,
-                            max_attempts=request_max_attempts(standard_request),
-                            usage_delta_factory=build_usage_delta_factory(prompt),
-                            allow_after_visible_output=True,
-                            capture_events=False,
-                            on_delta=on_delta,
+                        def format_answer(text):
+                            return translator._make_chunk({"content": text})
+
+                        def format_reasoning(text):
+                            return translator._make_chunk({"reasoning_content": text})
+
+                        translator._ensure_role_chunk()
+
+                        on_delta = make_on_delta(
+                            pump,
+                            streamer=streamer,
+                            format_answer=format_answer,
+                            format_reasoning=format_reasoning,
                         )
-                        execution = result.execution
-                        directive = result.directive or build_tool_directive(standard_request, execution.state)
-                        assistant_message = build_openai_assistant_history_message(
-                            execution=execution,
-                            request=standard_request,
-                            directive=directive,
-                        )
-                        await persist_session_turn(
-                            app=app,
-                            request=standard_request,
-                            surface="openai",
-                            execution=execution,
-                            assistant_message=assistant_message,
-                        )
-                        final_finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else execution.state.finish_reason
-                        for chunk in translator.finalize(final_finish_reason):
+
+                        finish_reason = None  # được set bởi runner
+                        execution_result = None
+
+                        async def runner():
+                            nonlocal translator, finish_reason, execution_result
+                            result = await run_retryable_completion_bridge(
+                                client=client,
+                                standard_request=standard_request,
+                                prompt=prompt,
+                                users_db=users_db,
+                                token=token,
+                                history_messages=history_messages,
+                                max_attempts=request_max_attempts(standard_request),
+                                usage_delta_factory=build_usage_delta_factory(prompt),
+                                allow_after_visible_output=True,
+                                capture_events=False,
+                                on_delta=on_delta,
+                            )
+                            execution = result.execution
+                            directive = result.directive or build_tool_directive(standard_request, execution.state)
+                            assistant_message = build_openai_assistant_history_message(
+                                execution=execution,
+                                request=standard_request,
+                                directive=directive,
+                            )
+                            await persist_session_turn(
+                                app=app,
+                                request=standard_request,
+                                surface="openai",
+                                execution=execution,
+                                assistant_message=assistant_message,
+                            )
+                            finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else execution.state.finish_reason
+                            execution_result = result
+
+                        task = pump.start(runner())
+
+                        # Yield chunks real-time từ pump
+                        async for kind, payload in pump.pump():
+                            if kind == "error":
+                                yield f"data: {json.dumps({'error': str(payload)})}\n\n"
+                                return
+                            yield payload
+
+                        # Runner kết thúc → flush streamer guard + finalize
+                        for chunk in flush_streamer_tail(streamer, format_answer):
                             yield chunk
+
+                        # translator.emit đã stream các chunk trong quá trình chạy
+                        # Giờ chỉ emit finish chunk + [DONE]
+                        finish_chunks = translator.finalize(finish_reason or "stop")
+                        for chunk in finish_chunks:
+                            yield chunk
+
+                        await task
                         return
                     except HTTPException as he:
                         await clear_invalidated_session_chat(app=app, request=standard_request)

@@ -23,6 +23,7 @@ class OpenAIStreamTranslator:
         client_profile: str,
         build_final_directive: Callable[[str], RuntimeToolDirective] | None = None,
         allowed_tool_names: list[str] | None = None,
+        stream_callback: Callable[[str], None] | None = None,
     ):
         self.completion_id = completion_id
         self.created = created
@@ -30,6 +31,7 @@ class OpenAIStreamTranslator:
         self.client_profile = client_profile
         self.build_final_directive = build_final_directive
         self.allowed_tool_names = {name for name in (allowed_tool_names or []) if isinstance(name, str) and name}
+        self.stream_callback = stream_callback  # Nếu set → emit chunks real-time
         self.pending_chunks: list[str] = []
         self.role_chunk_sent = False
         self.emitted_tool_index = 0
@@ -37,6 +39,7 @@ class OpenAIStreamTranslator:
         self.buffered_toolish_fragments: list[str] = []
         self.pending_content_chunks: list[str] = []
         self.tool_calls_emitted = False
+        self._finalizing = False  # flag: đang trong finalize, không emit qua callback
         self.tool_text_detection_mode = self._resolve_tool_text_detection_mode(client_profile)
         self.tool_call_finalize_mode = self._resolve_tool_call_finalize_mode(client_profile)
 
@@ -83,33 +86,41 @@ class OpenAIStreamTranslator:
             return bool(self.buffered_toolish_fragments)
         return True
 
-    def _ensure_role_chunk(self) -> None:
-        if self.role_chunk_sent:
-            return
-        yield_payload = {
+    def _make_chunk(self, delta: dict, finish_reason=None) -> str:
+        payload = {
             "id": self.completion_id,
             "object": "chat.completion.chunk",
             "created": self.created,
             "model": self.model_name,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
-        self.pending_chunks.append(f"data: {json.dumps(yield_payload, ensure_ascii=False)}\n\n")
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _ensure_role_chunk(self) -> None:
+        if self.role_chunk_sent:
+            return
+        chunk = self._make_chunk({"role": "assistant"})
+        if self.stream_callback:
+            self.stream_callback(chunk)
+        else:
+            self.pending_chunks.append(chunk)
         self.role_chunk_sent = True
 
     def _emit_content_chunk(self, text_chunk: str) -> None:
-        chunk = (
-            f"data: {json.dumps({'id': self.completion_id, 'object': 'chat.completion.chunk', 'created': self.created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': text_chunk}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n"
-        )
-        self.pending_chunks.append(chunk)
-        self.pending_content_chunks.append(chunk)
+        chunk = self._make_chunk({"content": text_chunk})
+        if self.stream_callback and not self._finalizing:
+            self.stream_callback(chunk)
+        else:
+            self.pending_chunks.append(chunk)
+            if not self._finalizing:
+                self.pending_content_chunks.append(chunk)
 
     def _emit_reasoning_chunk(self, text_chunk: str) -> None:
-        """把 Qwen 的思考内容以 DeepSeek R1 风格 reasoning_content 发出去，
-        让网页端/客户端能显示推理过程。"""
-        chunk = (
-            f"data: {json.dumps({'id': self.completion_id, 'object': 'chat.completion.chunk', 'created': self.created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'reasoning_content': text_chunk}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n"
-        )
-        self.pending_chunks.append(chunk)
+        chunk = self._make_chunk({"reasoning_content": text_chunk})
+        if self.stream_callback:
+            self.stream_callback(chunk)
+        else:
+            self.pending_chunks.append(chunk)
 
     def _discard_pending_content_chunks(self) -> None:
         if not self.pending_content_chunks:
@@ -122,8 +133,6 @@ class OpenAIStreamTranslator:
         self._ensure_role_chunk()
 
         if text_chunk and evt.get("phase") in ("think", "thinking_summary"):
-            # 把思考内容作为 reasoning_content 发给客户端（DeepSeek R1 风格）
-            # 网页端 TestPage 会单独显示这段"推理过程"
             self._emit_reasoning_chunk(text_chunk)
             return
 
@@ -145,14 +154,27 @@ class OpenAIStreamTranslator:
         for tool_call in tool_calls:
             idx = self.emitted_tool_index
             self.emitted_tool_index += 1
-            self.pending_chunks.append(
-                f"data: {json.dumps({'id': self.completion_id, 'object': 'chat.completion.chunk', 'created': self.created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'tool_calls': [{'index': idx, 'id': tool_call['id'], 'type': 'function', 'function': {'name': tool_call['name'], 'arguments': json.dumps(tool_call['input'], ensure_ascii=False)}}]}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n"
-            )
+            chunk = self._make_chunk({
+                "tool_calls": [{
+                    "index": idx,
+                    "id": tool_call["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tool_call["name"],
+                        "arguments": json.dumps(tool_call["input"], ensure_ascii=False),
+                    },
+                }],
+            })
+            if self.stream_callback:
+                self.stream_callback(chunk)
+            else:
+                self.pending_chunks.append(chunk)
         if tool_calls:
             self.tool_calls_emitted = True
 
     def finalize(self, finish_reason: str) -> list[str]:
         final_finish_reason = finish_reason
+        self._finalizing = True  # ngăn emit_content_chunk callback vào pump đã đóng
         buffered_text = "".join(self.buffered_toolish_fragments)
         if self.build_final_directive is not None and not self.tool_calls_emitted:
             directive = self.build_final_directive("".join(self.answer_fragments))
@@ -170,14 +192,18 @@ class OpenAIStreamTranslator:
                 if tool_calls:
                     self.emit_tool_calls(tool_calls)
                     final_finish_reason = "tool_calls"
-            elif buffered_text:
+            elif buffered_text and not self.tool_calls_emitted:
                 self._emit_content_chunk(buffered_text)
         elif buffered_text and not self.tool_calls_emitted:
             self._emit_content_chunk(buffered_text)
 
+        # Trong stream mode, pending_chunks đã được emit hết rồi — chỉ cần finish + DONE
+        if self.stream_callback:
+            finish_chunk = self._make_chunk({}, final_finish_reason)
+            done = "data: [DONE]\n\n"
+            return [finish_chunk, done]
+
         chunks = list(self.pending_chunks)
-        chunks.append(
-            f"data: {json.dumps({'id': self.completion_id, 'object': 'chat.completion.chunk', 'created': self.created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': final_finish_reason}]}, ensure_ascii=False)}\n\n"
-        )
+        chunks.append(self._make_chunk({}, final_finish_reason))
         chunks.append("data: [DONE]\n\n")
         return chunks

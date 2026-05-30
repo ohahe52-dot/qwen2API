@@ -11,6 +11,7 @@ from backend.core.config import resolve_model, settings
 from backend.core.request_logging import new_request_id, request_context, update_request_context
 from backend.runtime import stream_presenter
 from backend.runtime.execution import (
+    RuntimeAttemptState,
     build_tool_directive,
     cleanup_runtime_resources,
     collect_completion_run,
@@ -33,31 +34,45 @@ from backend.services.task_session import (
 )
 from backend.services.token_calc import count_tokens
 from backend.toolcall.normalize import build_tool_name_registry
+from backend.api._stream_pump import StreamPump, make_on_delta, flush_streamer_tail
+from backend.services.incremental_text_streamer import IncrementalTextStreamer
 
 log = logging.getLogger("qwen2api.anthropic")
 router = APIRouter()
 
 
 class _AnthropicStreamState:
-    def __init__(self, *, msg_id: str, model_name: str, prompt: str):
+    def __init__(self, *, msg_id: str, model_name: str, prompt: str, stream_callback=None):
         self.msg_id = msg_id
         self.model_name = model_name
         self.prompt = prompt
+        self.stream_callback = stream_callback  # coroutine: async chunk -> None
         self.pending_chunks: list[str] = []
         self.answer_text_buffer: list[tuple[int, str]] = []
         self.block_index = 0
         self.current_block: dict[str, object] = {"type": None, "index": None, "tool_call_id": None}
         self.opened_tool_calls: set[str] = set()
+        self._message_start_sent = False
+
+    async def _emit(self, chunk: str) -> None:
+        if self.stream_callback:
+            await self.stream_callback(chunk)
+        else:
+            self.pending_chunks.append(chunk)
 
     def ensure_message_start(self) -> None:
-        if not self.pending_chunks:
-            self.pending_chunks.append(_message_start_event(self.msg_id, self.model_name, self.prompt, ""))
+        if not self._message_start_sent:
+            self._message_start_sent = True
+            chunk = _message_start_event(self.msg_id, self.model_name, self.prompt, "")
+            # message_start luôn buffer — cần emit trước các content chunk
+            self.pending_chunks.append(chunk)
 
     def close_current_block(self) -> None:
         index = self.current_block.get("index")
         if index is None:
             return
-        self.pending_chunks.append(stream_presenter.anthropic_content_block_stop(index))
+        chunk = stream_presenter.anthropic_content_block_stop(index)
+        self.pending_chunks.append(chunk)
         self.current_block = {"type": None, "index": None, "tool_call_id": None}
 
     def open_textual_block(self, block_type: str) -> int:
@@ -94,20 +109,27 @@ class _AnthropicStreamState:
         self.opened_tool_calls.add(tool_call_id)
         return index
 
-    def append_thinking_delta(self, text_chunk: str) -> None:
+    async def append_thinking_delta(self, text_chunk: str) -> None:
         index = self.open_textual_block("thinking")
-        self.pending_chunks.append(
+        await self._emit(
             stream_presenter.anthropic_content_block_delta(index, {"type": "thinking_delta", "thinking": text_chunk})
         )
 
-    def buffer_answer_text(self, text_chunk: str) -> None:
+    async def append_answer_text(self, text_chunk: str) -> None:
         index = self.open_textual_block("text")
-        self.answer_text_buffer.append((index, text_chunk))
+        if self.stream_callback:
+            # Stream mode: emit text_delta ngay
+            await self._emit(
+                stream_presenter.anthropic_content_block_delta(index, {"type": "text_delta", "text": text_chunk})
+            )
+        else:
+            # Buffer mode: giữ lại để flush sau
+            self.answer_text_buffer.append((index, text_chunk))
 
-    def append_tool_delta(self, *, tool_call_id: str, tool_name: str, partial_json: str) -> None:
+    async def append_tool_delta(self, *, tool_call_id: str, tool_name: str, partial_json: str) -> None:
         index = self.open_tool_block(tool_call_id, tool_name)
         if partial_json:
-            self.pending_chunks.append(
+            await self._emit(
                 stream_presenter.anthropic_content_block_delta(index, {"type": "input_json_delta", "partial_json": partial_json})
             )
 
@@ -293,7 +315,13 @@ async def anthropic_messages(request: Request):
                     current_prompt = prompt
                     max_attempts = request_max_attempts(standard_request)
                     for stream_attempt in range(max_attempts):
-                        stream_state = _AnthropicStreamState(msg_id=msg_id, model_name=model_name, prompt=current_prompt)
+                        pump = StreamPump()
+                        stream_state = _AnthropicStreamState(
+                            msg_id=msg_id, model_name=model_name, prompt=current_prompt,
+                            stream_callback=lambda chunk: pump.put(("ok", chunk)),
+                        )
+                        has_tools = bool(standard_request.tools)
+                        streamer = IncrementalTextStreamer(warmup_chars=64, guard_chars=256) if has_tools else None
                         try:
                             update_request_context(stream_attempt=stream_attempt + 1)
 
@@ -301,10 +329,16 @@ async def anthropic_messages(request: Request):
                                 stream_state.ensure_message_start()
                                 phase = evt.get("phase")
                                 if text_chunk and phase in ("think", "thinking_summary"):
-                                    stream_state.append_thinking_delta(text_chunk)
+                                    await stream_state.append_thinking_delta(text_chunk)
                                     return
                                 if text_chunk and phase == "answer":
-                                    stream_state.buffer_answer_text(text_chunk)
+                                    # Qua streamer guard nếu có tools
+                                    if streamer is not None:
+                                        released = streamer.push(text_chunk)
+                                        if released:
+                                            await stream_state.append_answer_text(released)
+                                    else:
+                                        await stream_state.append_answer_text(text_chunk)
                                     return
                                 if phase == "tool_call":
                                     extra = evt.get("extra", {}) or {}
@@ -314,48 +348,86 @@ async def anthropic_messages(request: Request):
                                     tool_name = extra.get("tool_name")
                                     if not tool_name:
                                         return
-                                    stream_state.append_tool_delta(
+                                    await stream_state.append_tool_delta(
                                         tool_call_id=str(tool_call_id),
                                         tool_name=str(tool_name),
                                         partial_json=evt.get("content", ""),
                                     )
 
-                            execution = await collect_completion_run_with_recovery(
-                                client,
-                                standard_request,
-                                current_prompt,
-                                capture_events=False,
-                                on_delta=on_delta,
-                                max_continuation=2,
-                                warmup_chars=64,
-                                guard_chars=96,
-                            )
-                            retry = evaluate_retry_directive(
-                                request=standard_request,
-                                current_prompt=current_prompt,
-                                history_messages=history_messages,
-                                attempt_index=stream_attempt,
-                                max_attempts=max_attempts,
-                                state=execution.state,
-                                allow_after_visible_output=True,
-                            )
-                            if retry.retry:
+                            async def runner():
+                                result = await collect_completion_run_with_recovery(
+                                    client,
+                                    standard_request,
+                                    current_prompt,
+                                    capture_events=False,
+                                    on_delta=on_delta,
+                                    max_continuation=2,
+                                    warmup_chars=64,
+                                    guard_chars=96,
+                                )
+                                return result.execution
+
+                            task = pump.start(runner())
+
+                            # Yield pending_chunks đầu tiên (message_start)
+                            for chunk in stream_state.pending_chunks:
+                                yield chunk
+                            stream_state.pending_chunks.clear()
+
+                            # Yield content chunks real-time từ pump
+                            execution = None
+                            error_from_pump = False
+                            async for kind, payload in pump.pump():
+                                if kind == "error":
+                                    # Lỗi → cleanup và retry nếu còn attempt
+                                    error_from_pump = True
+                                    break
+                                yield payload
+
+                            task_result = await task
+                            if task_result and not error_from_pump:
+                                execution = task_result
+
+                            # Flush streamer guard tail
+                            tail = streamer.finish() if streamer else ""
+                            if tail:
+                                await stream_state.append_answer_text(tail)
+
+                            # Retry logic
+                            if execution is not None:
+                                retry = evaluate_retry_directive(
+                                    request=standard_request,
+                                    current_prompt=current_prompt,
+                                    history_messages=history_messages,
+                                    attempt_index=stream_attempt,
+                                    max_attempts=max_attempts,
+                                    state=execution.state,
+                                    allow_after_visible_output=True,
+                                )
+                            elif error_from_pump:
+                                # Pump error → force retry if attempts remaining
+                                retry = type("Retry", (), {"retry": stream_attempt < max_attempts - 1, "reason": "stream_error", "next_prompt": current_prompt})()
+                            else:
+                                # No execution, no pump error → should not happen, but safe-guard
+                                retry = type("Retry", (), {"retry": False})()
+                            if retry.retry and stream_attempt < max_attempts - 1:
                                 reused_persistent_chat = bool(standard_request.persistent_session and standard_request.upstream_chat_id)
-                                # 如果正在复用会话，重试时保留会话，避免删除后重建导致上下文丢失
                                 preserve_chat = reused_persistent_chat
-                                await cleanup_runtime_resources(client, execution.acc, execution.chat_id, preserve_chat=preserve_chat)
+                                if execution is not None:
+                                    await cleanup_runtime_resources(client, execution.acc, execution.chat_id, preserve_chat=preserve_chat)
                                 if reused_persistent_chat:
-                                    # 保留 upstream_chat_id，在同一会话中重试
-                                    # standard_request.session_chat_invalidated = True
-                                    # standard_request.upstream_chat_id = None
                                     current_prompt = build_retry_rebase_prompt(standard_request, reason=retry.reason)
                                 else:
                                     current_prompt = retry.next_prompt
                                 await _reacquire_bound_account_if_needed(client=client, standard_request=standard_request)
+                                # Clear pending_chunks để attempt mới tạo message_start mới
+                                stream_state.pending_chunks.clear()
+                                stream_state._message_start_sent = False
                                 continue
 
+                            # Không retry → finalize
                             if not stream_state.pending_chunks:
-                                stream_state.pending_chunks.append(_message_start_event(msg_id, model_name, current_prompt, execution.state.answer_text))
+                                stream_state.pending_chunks.append(_message_start_event(msg_id, model_name, current_prompt, ""))
 
                             stream_state.close_current_block()
                             directive = build_tool_directive(standard_request, execution.state)
