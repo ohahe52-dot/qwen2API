@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Callable
 
@@ -109,29 +110,38 @@ class OpenAIStreamTranslator:
         }
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    def _ensure_role_chunk(self) -> None:
+    async def _ensure_role_chunk(self) -> None:
         if self.role_chunk_sent:
             return
         chunk = self._make_chunk({"role": "assistant"})
         if self.stream_callback:
-            self.stream_callback(chunk)
+            if asyncio.iscoroutinefunction(self.stream_callback):
+                await self.stream_callback(chunk)
+            else:
+                self.stream_callback(chunk)
         else:
             self.pending_chunks.append(chunk)
         self.role_chunk_sent = True
 
-    def _emit_content_chunk(self, text_chunk: str) -> None:
+    async def _emit_content_chunk(self, text_chunk: str) -> None:
         chunk = self._make_chunk({"content": text_chunk})
         if self.stream_callback and not self._finalizing:
-            self.stream_callback(chunk)
+            if asyncio.iscoroutinefunction(self.stream_callback):
+                await self.stream_callback(chunk)
+            else:
+                self.stream_callback(chunk)
         else:
             self.pending_chunks.append(chunk)
             if not self._finalizing:
                 self.pending_content_chunks.append(chunk)
 
-    def _emit_reasoning_chunk(self, text_chunk: str) -> None:
+    async def _emit_reasoning_chunk(self, text_chunk: str) -> None:
         chunk = self._make_chunk({"reasoning_content": text_chunk})
         if self.stream_callback:
-            self.stream_callback(chunk)
+            if asyncio.iscoroutinefunction(self.stream_callback):
+                await self.stream_callback(chunk)
+            else:
+                self.stream_callback(chunk)
         else:
             self.pending_chunks.append(chunk)
 
@@ -142,11 +152,11 @@ class OpenAIStreamTranslator:
         self.pending_chunks = [chunk for chunk in self.pending_chunks if id(chunk) not in pending_content_ids]
         self.pending_content_chunks = []
 
-    def on_delta(self, evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
-        self._ensure_role_chunk()
+    async def on_delta(self, evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
+        await self._ensure_role_chunk()
 
         if text_chunk and evt.get("phase") in ("think", "thinking_summary"):
-            self._emit_reasoning_chunk(text_chunk)
+            await self._emit_reasoning_chunk(text_chunk)
             return
 
         if text_chunk and evt.get("phase") == "answer":
@@ -156,14 +166,14 @@ class OpenAIStreamTranslator:
             elif self.buffered_toolish_fragments:
                 self.buffered_toolish_fragments.append(text_chunk)
             else:
-                self._emit_content_chunk(text_chunk)
+                await self._emit_content_chunk(text_chunk)
             return
 
         if tool_calls:
             self.emit_tool_calls(tool_calls)
 
-    def emit_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
-        self._ensure_role_chunk()
+    async def emit_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
+        await self._ensure_role_chunk()
         for tool_call in tool_calls:
             idx = self.emitted_tool_index
             self.emitted_tool_index += 1
@@ -179,13 +189,16 @@ class OpenAIStreamTranslator:
                 }],
             })
             if self.stream_callback:
-                self.stream_callback(chunk)
+                if asyncio.iscoroutinefunction(self.stream_callback):
+                    await self.stream_callback(chunk)
+                else:
+                    self.stream_callback(chunk)
             else:
                 self.pending_chunks.append(chunk)
         if tool_calls:
             self.tool_calls_emitted = True
 
-    def finalize(self, finish_reason: str) -> list[str]:
+    async def finalize(self, finish_reason: str) -> list[str]:
         final_finish_reason = finish_reason
         self._finalizing = True  # ngăn emit_content_chunk callback vào pump đã đóng
         buffered_text = "".join(self.buffered_toolish_fragments)
@@ -203,12 +216,12 @@ class OpenAIStreamTranslator:
                     if block.get("type") == "tool_use"
                 ]
                 if tool_calls:
-                    self.emit_tool_calls(tool_calls)
+                    await self.emit_tool_calls(tool_calls)
                     final_finish_reason = "tool_calls"
             elif buffered_text and not self.tool_calls_emitted:
-                self._emit_content_chunk(buffered_text)
+                await self._emit_content_chunk(buffered_text)
         elif buffered_text and not self.tool_calls_emitted:
-            self._emit_content_chunk(buffered_text)
+            await self._emit_content_chunk(buffered_text)
 
         # Trong stream mode, pending_chunks đã được emit hết rồi — chỉ cần finish + DONE
         if self.stream_callback:

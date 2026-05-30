@@ -153,13 +153,13 @@ async def chat_completions(request: Request):
                             stream_callback=_stream_callback,
                         )
 
-                        translator._ensure_role_chunk()
+                        await translator._ensure_role_chunk()
 
                         # CRITICAL: Call translator.on_delta() directly so tool detection runs.
                         # make_on_delta + format_answer bypasses translator → tool call markers
                         # leak as content. Pre-streaming (6514143) called translator directly and worked.
                         async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
-                            translator.on_delta(evt, text_chunk, tool_calls)
+                            await translator.on_delta(evt, text_chunk, tool_calls)
 
                         finish_reason = None  # được set bởi runner
                         execution_result = None
@@ -207,7 +207,7 @@ async def chat_completions(request: Request):
 
                         # translator đã emit các chunk real-time qua callback
                         # Giờ chỉ emit finish chunk + [DONE]
-                        finish_chunks = translator.finalize(finish_reason or "stop")
+                        finish_chunks = await translator.finalize(finish_reason or "stop")
                         for chunk in finish_chunks:
                             yield chunk
 
