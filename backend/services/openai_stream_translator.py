@@ -249,7 +249,7 @@ class OpenAIStreamTranslator:
                     },
                 }],
             })
-            if self.stream_callback:
+            if self.stream_callback and not self._finalizing:
                 if asyncio.iscoroutinefunction(self.stream_callback):
                     await self.stream_callback(chunk)
                 else:
@@ -293,11 +293,12 @@ class OpenAIStreamTranslator:
         elif buffered_text and not self.tool_calls_emitted:
             await self._emit_content_chunk(buffered_text)
 
-        # Trong stream mode, pending_chunks đã được emit hết rồi — chỉ cần finish + DONE
+        # Trong stream mode, bất kỳ chunk nào chưa gửi (hoặc được tạo trong finalize như tool_calls)
+        # phải được gom cùng finish + DONE để trả về trực tiếp từ hàm generator của v1_chat.py
         if self.stream_callback:
             finish_chunk = self._make_chunk({}, final_finish_reason)
             done = "data: [DONE]\n\n"
-            return [finish_chunk, done]
+            return list(self.pending_chunks) + [finish_chunk, done]
 
         chunks = list(self.pending_chunks)
         chunks.append(self._make_chunk({}, final_finish_reason))
