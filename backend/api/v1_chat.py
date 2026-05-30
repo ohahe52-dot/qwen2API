@@ -199,17 +199,20 @@ async def chat_completions(request: Request):
                         task = pump.start(runner())
 
                         # Yield chunks real-time từ pump
+                        had_error = False
                         async for kind, payload in pump.pump():
                             if kind == "error":
+                                had_error = True
                                 yield f"data: {json.dumps({'error': str(payload)})}\n\n"
                                 return
                             yield payload
 
                         # translator đã emit các chunk real-time qua callback
-                        # Giờ chỉ emit finish chunk + [DONE]
-                        finish_chunks = await translator.finalize(finish_reason or "stop")
-                        for chunk in finish_chunks:
-                            yield chunk
+                        # Giờ chỉ emit finish chunk + [DONE] nếu không có lỗi
+                        if not had_error:
+                            finish_chunks = await translator.finalize(finish_reason or "stop")
+                            for chunk in finish_chunks:
+                                yield chunk
 
                         await task
                         return

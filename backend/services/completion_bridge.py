@@ -102,8 +102,9 @@ async def run_retryable_completion_bridge(
             else:
                 current_prompt = retry.next_prompt
 
-            if not preserve_chat:
-                await asyncio.sleep(0.15)
+            # Always sleep briefly between retries to avoid hammering upstream
+            sleep_duration = 0.05 if preserve_chat else 0.15
+            await asyncio.sleep(sleep_duration)
             await _reacquire_bound_account_if_needed(client=client, standard_request=standard_request)
             continue
 

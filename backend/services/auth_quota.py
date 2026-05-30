@@ -47,12 +47,7 @@ async def resolve_auth_context(request: Request, users_db) -> AuthContext:
 
 
 async def add_used_tokens(users_db, token: str, delta: int) -> None:
+    """Atomically increment used_tokens for a user (safe under concurrent requests)."""
     if delta <= 0:
         return
-
-    users = await users_db.get()
-    for user in users:
-        if user["id"] == token:
-            user["used_tokens"] += delta
-            break
-    await users_db.save(users)
+    await users_db.update_one("id", token, "used_tokens", delta, op="add")

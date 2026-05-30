@@ -118,8 +118,8 @@ class AccountPool:
         self.max_queue_size = 0
         self.global_max_inflight = 0
 
-        # 等待队列（使用 asyncio.Queue 更接近 Go channel）
-        self._waiters_queue: asyncio.Queue = asyncio.Queue()
+        # 等待队列（使用 list 避免 race condition）
+        self._waiters: list = []
         self._sticky_email: Optional[str] = None
 
         # 全局并发计数
@@ -134,7 +134,7 @@ class AccountPool:
 
     def _reset_concurrency_limits(self):
         """重置并发限制 - 对齐 ds2api 的 Reset() 逻辑"""
-        account_count = len([a for a in self.accounts if a.is_available()])
+        account_count = len([a for a in self.accounts if a.valid])
 
         # 计算推荐并发值（对齐 ds2api）
         self.recommended_concurrency = account_count * self.max_inflight_per_account
@@ -187,7 +187,7 @@ class AccountPool:
         """检查是否可以加入等待队列"""
         if self.max_queue_size <= 0:
             return False
-        return self._waiters_queue.qsize() < self.max_queue_size
+        return len(self._waiters) < self.max_queue_size
 
     def status(self):
         """返回账号池状态"""
@@ -211,6 +211,6 @@ class AccountPool:
             "recommended_concurrency": self.recommended_concurrency,
             "max_queue_size": self.max_queue_size,
             "global_max_inflight": self.global_max_inflight,
-            "waiting": self._waiters_queue.qsize(),
+            "waiting": len(self._waiters),
             "account_min_interval_ms": getattr(settings, "ACCOUNT_MIN_INTERVAL_MS", 0),
         }

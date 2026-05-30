@@ -185,8 +185,11 @@ async def _run_anthropic_attempt(
 
 
 def _visible_answer_text_length(*, directive, execution, stream_state: _AnthropicStreamState | None = None) -> int:
-    if directive.stop_reason == "tool_use":
-        return 0
+    """Calculate visible answer text length for usage reporting.
+
+    Returns the length of text that was actually streamed to the client,
+    even if the response ended with tool_use (text before tool calls counts).
+    """
     if stream_state is not None:
         return sum(len(text_chunk) for _, text_chunk in stream_state.answer_text_buffer)
     return len(execution.state.answer_text)
@@ -316,9 +319,13 @@ async def anthropic_messages(request: Request):
                     max_attempts = request_max_attempts(standard_request)
                     for stream_attempt in range(max_attempts):
                         pump = StreamPump()
+
+                        async def stream_callback(chunk: str) -> None:
+                            await pump.put(("ok", chunk))
+
                         stream_state = _AnthropicStreamState(
                             msg_id=msg_id, model_name=model_name, prompt=current_prompt,
-                            stream_callback=lambda chunk: pump.put(("ok", chunk)),
+                            stream_callback=stream_callback,
                         )
                         has_tools = bool(standard_request.tools)
                         streamer = IncrementalTextStreamer(warmup_chars=64, guard_chars=256) if has_tools else None

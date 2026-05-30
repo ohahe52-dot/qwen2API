@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -18,15 +19,12 @@ from backend.toolcall.stream_state import StreamingToolCallState
 
 # Qwen 偶尔生成的毒性"工具不存在"或"无法继续"幻觉。
 # 在流式收到前 20 字时识别，触发早期拦截 + retry 而不是流给客户端。
+#
+# 仅匹配工具相关的明确拒绝信号，避免误杀通用表达如 "I cannot help" 等。
 _TOXIC_REFUSAL_RE = re.compile(
     # 英文：工具不存在/不可用
     r"Tool\s+\S+\s+(?:does\s+not\s+exists?|is\s+not\s+(?:available|registered))"
     r"|I\s+cannot\s+execute\s+this\s+tool"
-    # 英文：任务放弃/拒绝继续
-    r"|I[''\u2019]?\s*m\s+sorry[,. ]"
-    r"|I\s+cannot\s+(?:help|assist|proceed|continue|support|perform)"
-    r"|I[''\u2019]?m\s+not\s+(?:able|designed)\s+to"
-    r"|unable\s+to\s+(?:proceed|continue|perform|complete)"
     # 中文：工具/操作不存在或无法继续
     r"|该工具.{0,8}?不存在|工具.{0,12}?不存在"
     r"|我(?:无法|不能|不可以)(?:继续|进行|支持|完成|操作|执行)"

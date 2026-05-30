@@ -23,30 +23,27 @@ def _jitter_seconds() -> float:
 
 
 class AccountAcquireMixin:
-    """账号获取逻辑混入类"""
+    “””账号获取逻辑混入类”””
 
     async def _remove_waiter(self, waiter: asyncio.Event) -> None:
-        """
+        “””
         从等待队列中移除 waiter（若仍在队列中）。
 
         acquire_wait* 可能因超时返回；若不清理 waiter，队列长度会持续增长，
-        在 max_queue_size 较小时会出现“队列假满”并拒绝后续请求。
-        """
+        在 max_queue_size 较小时会出现”队列假满”并拒绝后续请求。
+        “””
         async with self._lock:
-            queue = getattr(self._waiters_queue, "_queue", None)
-            if queue is None:
-                return
             try:
-                queue.remove(waiter)
+                self._waiters.remove(waiter)
             except ValueError:
-                # 已被 release() 的 notify 弹出，属于正常竞争场景
+                # 已被 _notify_waiter 弹出，属于正常竞争场景
                 pass
 
-    async def acquire(self, exclude: Optional[set] = None) -> Optional["Account"]:
-        """
+    async def acquire(self, exclude: Optional[set] = None) -> Optional[“Account”]:
+        “””
         立即获取账号（不等待）
         对齐 ds2api 的 Acquire() 逻辑
-        """
+        “””
         async with self._lock:
             now = time.time()
 
@@ -77,11 +74,11 @@ class AccountAcquireMixin:
 
             return best
 
-    async def acquire_preferred(self, preferred_email: Optional[str] = None, exclude: Optional[set] = None) -> Optional["Account"]:
-        """
+    async def acquire_preferred(self, preferred_email: Optional[str] = None, exclude: Optional[set] = None) -> Optional[“Account”]:
+        “””
         优先获取指定账号
         对齐 ds2api 的 AcquirePreferred() 逻辑
-        """
+        “””
         if not preferred_email:
             return await self.acquire(exclude)
 
@@ -111,11 +108,11 @@ class AccountAcquireMixin:
         # 指定账号不可用，回退到普通获取
         return await self.acquire(exclude)
 
-    async def acquire_wait(self, timeout: float = 60, exclude: Optional[set] = None) -> Optional["Account"]:
-        """
+    async def acquire_wait(self, timeout: float = 60, exclude: Optional[set] = None) -> Optional[“Account”]:
+        “””
         等待获取账号（带超时）
         对齐 ds2api 的 AcquireWait() 逻辑
-        """
+        “””
         deadline = time.time() + timeout
 
         while True:
@@ -128,6 +125,7 @@ class AccountAcquireMixin:
             async with self._lock:
                 candidates = [a for a in self.accounts if a.valid and (not exclude or a.email not in exclude)]
                 if not candidates:
+                    log.warning("[AccountPool] acquire_wait failed: no valid candidates")
                     return None
 
                 # 计算下次可用时间
@@ -136,16 +134,18 @@ class AccountAcquireMixin:
             # 检查超时
             remaining = deadline - time.time()
             if remaining <= 0:
+                log.warning("[AccountPool] acquire_wait failed: timeout exceeded")
                 return None
 
             # 检查队列是否已满
             if not self._can_queue():
-                log.warning(f"[AccountPool] 等待队列已满 ({self._waiters_queue.qsize()}/{self.max_queue_size})")
+                log.warning(f”[AccountPool] 等待队列已满 ({len(self._waiters)}/{self.max_queue_size})”)
                 return None
 
             # 加入等待队列
             waiter = asyncio.Event()
-            await self._waiters_queue.put(waiter)
+            async with self._lock:
+                self._waiters.append(waiter)
 
             # 计算等待时间
             wait_timeout = min(remaining, max(0.05, next_ready_at - time.time() + 0.05))
@@ -159,11 +159,11 @@ class AccountAcquireMixin:
 
     async def acquire_wait_preferred(
         self, preferred_email: Optional[str] = None, timeout: float = 60, exclude: Optional[set] = None
-    ) -> Optional["Account"]:
-        """
+    ) -> Optional[“Account”]:
+        “””
         等待获取指定账号
         对齐 ds2api 的 AcquireWaitPreferred() 逻辑
-        """
+        “””
         deadline = time.time() + timeout
 
         while True:
@@ -179,7 +179,8 @@ class AccountAcquireMixin:
                 return None
 
             waiter = asyncio.Event()
-            await self._waiters_queue.put(waiter)
+            async with self._lock:
+                self._waiters.append(waiter)
 
             try:
                 await asyncio.wait_for(waiter.wait(), timeout=min(remaining, 0.5))
@@ -188,11 +189,11 @@ class AccountAcquireMixin:
             finally:
                 await self._remove_waiter(waiter)
 
-    def release(self, acc: "Account"):
-        """
+    def release(self, acc: “Account”):
+        “””
         释放账号
         对齐 ds2api 的 Release() 逻辑
-        """
+        “””
         if not acc or not acc.email:
             return
 
@@ -200,22 +201,24 @@ class AccountAcquireMixin:
         acc.last_request_finished = time.time()
         self.global_in_use = max(0, self.global_in_use - 1)
 
-        # 唤醒等待队列中的第一个
-        self._notify_waiter()
+        # 唤醒等待队列中的第一个（schedule as task to avoid blocking）
+        asyncio.create_task(self._notify_waiter())
 
-    def _notify_waiter(self):
-        """
+    async def _notify_waiter(self):
+        “””
         唤醒等待队列中的第一个等待者
         对齐 ds2api 的 notifyWaiterLocked()
-        """
-        if self._waiters_queue.empty():
-            return
 
-        try:
-            waiter = self._waiters_queue.get_nowait()
-            waiter.set()  # 唤醒
-        except asyncio.QueueEmpty:
-            pass
+        IMPORTANT: Pop waiter under lock, then set it outside lock to avoid
+        deadlock (the woken coroutine may try to acquire the same lock in
+        _remove_waiter's finally block).
+        “””
+        waiter = None
+        async with self._lock:
+            if self._waiters:
+                waiter = self._waiters.pop(0)
+        if waiter is not None:
+            waiter.set()
 
     def mark_invalid(self, acc: "Account", reason: str = "invalid", error_message: str = ""):
         """标记账号为不可用"""
