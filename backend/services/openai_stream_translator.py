@@ -170,7 +170,7 @@ class OpenAIStreamTranslator:
             return
 
         if tool_calls:
-            self.emit_tool_calls(tool_calls)
+            await self.emit_tool_calls(tool_calls)
 
     async def emit_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
         await self._ensure_role_chunk()
