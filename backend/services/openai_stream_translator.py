@@ -42,6 +42,7 @@ class OpenAIStreamTranslator:
         self._finalizing = False  # flag: đang trong finalize, không emit qua callback
         self.tool_text_detection_mode = self._resolve_tool_text_detection_mode(client_profile)
         self.tool_call_finalize_mode = self._resolve_tool_call_finalize_mode(client_profile)
+        self._buffering_tool = False  # track: đang buffer tool content (một khi bắt đầu thì không dừng)
 
     @staticmethod
     def _resolve_tool_text_detection_mode(client_profile: str) -> str:
@@ -60,17 +61,28 @@ class OpenAIStreamTranslator:
         if not text_chunk:
             return False
         lowered = text_chunk.lower()
+
+        # Once we've started buffering tool content, keep buffering everything
+        # (tool calls can span many chunks; we don't want to emit partial markers as content)
+        if self._buffering_tool:
+            return True
+
+        # Fast path: detect partial ##TOOL_CALL## markers even in small chunks
+        if any(marker in lowered for marker in ("##tool_call", "##end_call")):
+            self._buffering_tool = True
+            return True
+
+        # Common refusal/toxic markers that indicate tool output
         common_markers = (
             "tool does not exists",
             "</think>",
             "function.name:",
-            "##tool_call##",
-            "##end_call##",
             '"tool_calls"',
             '"function":',
         )
         if any(marker in lowered for marker in common_markers):
             return True
+
         if self.allowed_tool_names:
             detailed = parse_tool_calls_detailed(text_chunk, self.allowed_tool_names)
             if detailed.get("saw_tool_syntax"):
