@@ -25,8 +25,7 @@ from backend.services.task_session import (
     plan_persistent_session_turn,
 )
 from backend.runtime.execution import RuntimeAttemptState, build_tool_directive, build_usage_delta_factory, request_max_attempts
-from backend.api._stream_pump import StreamPump, make_on_delta, flush_streamer_tail
-from backend.services.incremental_text_streamer import IncrementalTextStreamer
+from backend.api._stream_pump import StreamPump
 
 log = logging.getLogger("qwen2api.chat")
 router = APIRouter()
@@ -136,7 +135,6 @@ async def chat_completions(request: Request):
                         update_request_context(stream_attempt=1)
                         pump = StreamPump()
                         translator = None
-                        streamer = None
 
                         async def _stream_callback(chunk: str) -> None:
                             await pump.put(("ok", chunk))
@@ -155,28 +153,13 @@ async def chat_completions(request: Request):
                             stream_callback=_stream_callback,
                         )
 
-                        # IncrementalTextStreamer guard cho text answer (phát hiện tool-call marker)
-                        has_tools = bool(standard_request.tools)
-                        if has_tools:
-                            streamer = IncrementalTextStreamer(
-                                warmup_chars=64,
-                                guard_chars=256,
-                            )
-
-                        def format_answer(text):
-                            return translator._make_chunk({"content": text})
-
-                        def format_reasoning(text):
-                            return translator._make_chunk({"reasoning_content": text})
-
                         translator._ensure_role_chunk()
 
-                        on_delta = make_on_delta(
-                            pump,
-                            streamer=streamer,
-                            format_answer=format_answer,
-                            format_reasoning=format_reasoning,
-                        )
+                        # CRITICAL: Call translator.on_delta() directly so tool detection runs.
+                        # make_on_delta + format_answer bypasses translator → tool call markers
+                        # leak as content. Pre-streaming (6514143) called translator directly and worked.
+                        async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
+                            translator.on_delta(evt, text_chunk, tool_calls)
 
                         finish_reason = None  # được set bởi runner
                         execution_result = None
@@ -222,11 +205,7 @@ async def chat_completions(request: Request):
                                 return
                             yield payload
 
-                        # Runner kết thúc → flush streamer guard + finalize
-                        for chunk in flush_streamer_tail(streamer, format_answer):
-                            yield chunk
-
-                        # translator.emit đã stream các chunk trong quá trình chạy
+                        # translator đã emit các chunk real-time qua callback
                         # Giờ chỉ emit finish chunk + [DONE]
                         finish_chunks = translator.finalize(finish_reason or "stop")
                         for chunk in finish_chunks:
