@@ -8,7 +8,7 @@ from backend.runtime.execution import RuntimeToolDirective
 from backend.toolcall.parser import parse_tool_calls_detailed
 
 
-STRICT_TOOL_TEXT_PREFIXES = ("{", "[", "`", "<")
+STRICT_TOOL_TEXT_PREFIXES = ("{", "[", "`", "<", "#")
 BUFFERED_TOOL_CALLS_ONLY = "buffered_tool_calls_only"
 DIRECTIVE_DRIVEN_TOOL_CALLS = "directive_driven_tool_calls"
 
@@ -51,8 +51,9 @@ class OpenAIStreamTranslator:
 
     @staticmethod
     def _resolve_tool_call_finalize_mode(client_profile: str) -> str:
-        if client_profile == CLAUDE_CODE_OPENAI_PROFILE:
-            return BUFFERED_TOOL_CALLS_ONLY
+        # Use directive-driven for all profiles: always try to parse tool calls from
+        # answer_fragments via build_final_directive, rather than requiring buffered content.
+        # This fixes CLAUDE_CODE profile where ##TOOL_CALL## markers were previously dropped.
         return DIRECTIVE_DRIVEN_TOOL_CALLS
 
     def _looks_like_tool_output(self, text_chunk: str) -> bool:
