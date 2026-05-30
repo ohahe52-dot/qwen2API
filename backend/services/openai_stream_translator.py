@@ -44,6 +44,7 @@ class OpenAIStreamTranslator:
         self.tool_text_detection_mode = self._resolve_tool_text_detection_mode(client_profile)
         self.tool_call_finalize_mode = self._resolve_tool_call_finalize_mode(client_profile)
         self._buffering_tool = False  # track: đang buffer tool content (một khi bắt đầu thì không dừng)
+        self.content_accumulator = ""  # tích lũy text content để lọc marker không bị rò rỉ khi stream bị phân mảnh
 
     @staticmethod
     def _resolve_tool_text_detection_mode(client_profile: str) -> str:
@@ -57,6 +58,18 @@ class OpenAIStreamTranslator:
         # answer_fragments via build_final_directive, rather than requiring buffered content.
         # This fixes CLAUDE_CODE profile where ##TOOL_CALL## markers were previously dropped.
         return DIRECTIVE_DRIVEN_TOOL_CALLS
+
+    @staticmethod
+    def _find_partial_marker_length(text: str, markers: list[str]) -> int:
+        if not text:
+            return 0
+        text_lower = text.lower()
+        for i in range(min(len(text), 30), 0, -1):
+            suffix = text_lower[-i:]
+            for m in markers:
+                if m.startswith(suffix) and len(suffix) < len(m):
+                    return len(suffix)
+        return 0
 
     def _looks_like_tool_output(self, text_chunk: str) -> bool:
         if not text_chunk:
@@ -161,12 +174,60 @@ class OpenAIStreamTranslator:
 
         if text_chunk and evt.get("phase") == "answer":
             self.answer_fragments.append(text_chunk)
-            if self._looks_like_tool_output(text_chunk):
+
+            if self._buffering_tool:
                 self.buffered_toolish_fragments.append(text_chunk)
-            elif self.buffered_toolish_fragments:
-                self.buffered_toolish_fragments.append(text_chunk)
+                return
+
+            self.content_accumulator += text_chunk
+
+            # Các marker hoàn chỉnh biểu thị sự bắt đầu của một công cụ gọi
+            markers = [
+                "##tool_call##",
+                "<tool_call>",
+                '{"tool_calls"',
+                '{"name":',
+                "function.name:",
+                '"tool_calls"',
+                '"function":',
+                "tool does not exists",
+                "</think>"
+            ]
+
+            # Tìm xem có marker hoàn chỉnh nào bắt đầu xuất hiện trong bộ đệm tích lũy
+            found_marker_idx = -1
+            lower_accum = self.content_accumulator.lower()
+            for m in markers:
+                idx = lower_accum.find(m)
+                if idx >= 0:
+                    if found_marker_idx == -1 or idx < found_marker_idx:
+                        found_marker_idx = idx
+
+            if found_marker_idx >= 0:
+                # Giải phóng phần text an toàn nằm trước marker gọi tool
+                safe_text = self.content_accumulator[:found_marker_idx]
+                if safe_text:
+                    await self._emit_content_chunk(safe_text)
+
+                # Bắt đầu đưa phần marker gọi tool và phần phía sau vào bộ đệm tool
+                tool_text = self.content_accumulator[found_marker_idx:]
+                self.buffered_toolish_fragments.append(tool_text)
+                self._buffering_tool = True
+                self.content_accumulator = ""
+                return
+
+            # Nếu chưa có marker hoàn chỉnh, kiểm tra xem phần đuôi có phải là một marker dở dang (partial) hay không
+            partial_len = self._find_partial_marker_length(self.content_accumulator, markers)
+            if partial_len > 0:
+                # Giải phóng phần text an toàn, giữ lại đuôi dở dang để gộp tiếp ở chunk sau
+                safe_text = self.content_accumulator[:-partial_len]
+                if safe_text:
+                    await self._emit_content_chunk(safe_text)
+                self.content_accumulator = self.content_accumulator[-partial_len:]
             else:
-                await self._emit_content_chunk(text_chunk)
+                # Không có marker dở dang, giải phóng toàn bộ bộ đệm tích lũy an toàn ra client
+                await self._emit_content_chunk(self.content_accumulator)
+                self.content_accumulator = ""
             return
 
         if tool_calls:
@@ -201,6 +262,15 @@ class OpenAIStreamTranslator:
     async def finalize(self, finish_reason: str) -> list[str]:
         final_finish_reason = finish_reason
         self._finalizing = True  # ngăn emit_content_chunk callback vào pump đã đóng
+
+        # Flush bất kỳ nội dung nào còn dư lại trong bộ tích lũy ra các kênh tương ứng trước khi đóng
+        if self.content_accumulator:
+            if self._buffering_tool:
+                self.buffered_toolish_fragments.append(self.content_accumulator)
+            else:
+                await self._emit_content_chunk(self.content_accumulator)
+            self.content_accumulator = ""
+
         buffered_text = "".join(self.buffered_toolish_fragments)
         if self.build_final_directive is not None and not self.tool_calls_emitted:
             directive = self.build_final_directive("".join(self.answer_fragments))
